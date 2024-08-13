@@ -4,12 +4,12 @@ import numpy as np
 from stl import mesh
 import math
 import json
-from collections import defaultdict
-
 import matplotlib.pyplot as plt
-
+from collections import defaultdict
+from helperClasses import Node, Channel, Arc
 
 eps = 1e-10
+
 
 def read_in_network_file(filename):
     '''
@@ -23,11 +23,10 @@ def read_in_network_file(filename):
 
     with open(filename) as f:
         json_data = json.load(f)
-        module_y_offset = json_data['module_y_offset']
-        discharge_y_offset = -json_data['discharge_offset']
+        y_offset = json_data['module_y_offset']
+        discharge_y_offset = -json_data['discharge_offset']  # ?? wieso minus?
         supply_y_offset = json_data['supply_offset'] # because the y axis is reversed in the definition
         z = 0.0
-
         channel_height = json_data['channel_height'] * 2 # TODO this is just for the print
         # channel_height = 0.0003 # TODO this is just for the print
 
@@ -42,30 +41,35 @@ def read_in_network_file(filename):
         # ADD MODULE NODES AND CHANNELS
         for m in reversed(json_data['modules']): # Their order determines their ID
             delay = num_extra_nodes #TODO rename this variable
-            module_x_offset = m['module_x_offset']
-            if connection_node is None or supply_carry_node is None or discharge_carry_node is None:
-                # technically these nodes are doubled since they will be created for the next module again
-                connection_node = [module_x_offset + m['channels']['c_main']['length'] + m['channels']['c_post']['length'], module_y_offset, z]
-                discharge_carry_node = [module_x_offset + m['channels']['c_main']['length'] + m['channels']['c_post']['length'], module_y_offset - discharge_y_offset, z]
-                supply_carry_node = [module_x_offset - m['channels']['c_pre']['length'], module_y_offset + supply_y_offset, z]
+            m_x_offset = m['module_x_offset']
+            m_c_main_len = m['channels']['c_main']['length']
+            m_c_pre_len = m['channels']['c_pre']['length']
+            m_c_post_len = m['channels']['c_post']['length']
+            
+            if connection_node is None or supply_carry_node is None or discharge_carry_node is None: # ?? aktuell immer für erstes m in modules true -> wenn ja auch eleganter möglich
+                # technically these nodes are doubled since they will be created for the next module again   # ?? wieso dann bebötigt?
+                connection_node = Node(m_x_offset + m_c_main_len + m_c_post_len, y_offset, z) # ?? welche typen an nodes gibt es alle (was macht sie aus)? ggf auch als enum in der klasse definieren
+                discharge_carry_node = Node(m_x_offset + m_c_main_len + m_c_post_len, y_offset - discharge_y_offset, z)
+                supply_carry_node = Node(m_x_offset - m_c_pre_len, y_offset + supply_y_offset, z)
                 nodes.extend([connection_node, discharge_carry_node, supply_carry_node])
-            # else: 
+            # else: # ?? kann das weg?
             #     connection_node = next_connection_node
             #     discharge_carry_node = next_discharge_carry_node
             #     supply_carry_node = next_supply_carry_node
 
-            main_pre_node = [module_x_offset, module_y_offset, 0.0]
-            main_post_node = [module_x_offset + m['channels']['c_main']['length'], module_y_offset, z]
-            connection_pre_node = [module_x_offset - m['channels']['c_pre']['length'], module_y_offset, z]
+            main_pre_node = Node(m_x_offset, y_offset, 0.0)
+            main_post_node = Node(m_x_offset + m_c_main_len, y_offset, z)
+            connection_pre_node = Node(m_x_offset - m_c_pre_len, y_offset, z)
             
-            next_connection_node = [module_x_offset - m['channels']['c_pre']['length'] - m['channels']['c_connection']['length'], module_y_offset, z]
-            next_discharge_carry_node = [module_x_offset + m['channels']['c_main']['length'] + m['channels']['c_post']['length'] - m['channels']['c_discharge_carry']['length'], module_y_offset - discharge_y_offset, z]
-            next_supply_carry_node = [module_x_offset - m['channels']['c_pre']['length'] - m['channels']['c_supply_carry']['length'], module_y_offset + supply_y_offset, z]
+            next_connection_node = Node(m_x_offset - m_c_pre_len - m['channels']['c_connection']['length'], y_offset, z)
+            next_discharge_carry_node = Node(m_x_offset + m_c_main_len + m_c_post_len - m['channels']['c_discharge_carry']['length'], y_offset - discharge_y_offset, z)
+            next_supply_carry_node = Node(m_x_offset - m_c_pre_len - m['channels']['c_supply_carry']['length'], y_offset + supply_y_offset, z)
             
             nodes.extend([main_pre_node, main_post_node, connection_pre_node, next_connection_node, next_discharge_carry_node, next_supply_carry_node]) # TODO check if this is changed each loop i.e. the list is altered
 
             for channel_name, channel in m['channels'].items(): # TODO this depends on the input (in ooc there are vias and rounded vias, here its line segments and arcs)
             # channel_name, channel = m['channels'].items()
+                c_width = channel['width']
 
                 connection_node_id = node_id_counter - delay
                 discharge_carry_node_id = node_id_counter + 1 - delay
@@ -79,112 +83,115 @@ def read_in_network_file(filename):
                 next_discharge_carry_node_id = node_id_counter + 7 #- num_extra_nodes
                 next_supply_carry_node_id = node_id_counter + 8 #- num_extra_nodes
 
-                if channel_name == 'c_main':
-                    channels.append([main_pre_node_id, main_post_node_id, channel['width']]) # c_main # TODO maybe exchange this with nodeId!!
-                    organ_channels.append([main_pre_node_id, main_post_node_id])
-                if channel_name == 'c_pre':
-                    channels.append([connection_pre_node_id, main_pre_node_id, channel['width']]) # c_pre
-                if channel_name == 'c_post':
-                    channels.append([main_post_node_id, connection_node_id, channel['width']]) # c_post
-                if channel_name == 'c_connection':
-                    channels.append([next_connection_node_id, connection_pre_node_id, channel['width']]) # c_connection
+                match channel_name: ## ?? welche channel types gibt es alle (was macht sie aus) und ggf als enum in Klasse?
+                    case 'c_main':
+                        channels.append(Channel(main_pre_node_id, main_post_node_id, c_width)) # c_main # TODO maybe exchange this with nodeId!!
+                        organ_channels.append([main_pre_node_id, main_post_node_id])
+                    case 'c_pre':
+                        channels.append(Channel(connection_pre_node_id, main_pre_node_id, c_width)) # c_pre
+                    case 'c_post':
+                        channels.append(Channel(main_post_node_id, connection_node_id, c_width)) # c_post
+                    case 'c_connection':
+                        channels.append(Channel(next_connection_node_id, connection_pre_node_id, c_width)) # c_connection
+                    case 'c_supply_carry':
+                        channels.append(Channel(next_supply_carry_node_id, supply_carry_node_id , c_width)) # c_supply_carry
+                    case 'c_discharge_carry':
+                        channels.append(Channel(discharge_carry_node_id, next_discharge_carry_node_id, c_width)) # c_discharge_carry
+                    case 'c_supply': #c_supply
+                        if 'rounded_vias' in channel:
+                            via = channel['rounded_vias']
+                            num_pieces = len(via)
+                            num_extra_nodes += num_pieces * 2
+                            current_start_node = connection_pre_node_id
+                            for i in range(num_pieces + 1):
+                                if i == num_pieces:
+                                    end_node = supply_carry_node_id
+                                    channels.append([current_start_node, end_node, c_width])
+                                else:
+                                    end_node = via[i][0] + [c_width]  ## ?? wieso + [c_width] (hier wird c_width als z koordinate verwendet und dann z appended)
+                                    end_node.append(z)
+                                    end_node[0] += m_x_offset - m_c_pre_len
+                                    nodes.append(end_node)
+                                    channels.append([current_start_node, len(nodes)-1, c_width])
+                                    start_node = end_node # ?? never used
+                                    center = via[i][1] 
+                                    center[0] += m_x_offset - m_c_pre_len
+                                    arc_end_node = via[i][2] 
+                                    arc_end_node.append(z)
+                                    arc_end_node[0] += m_x_offset - m_c_pre_len
+                                    nodes.append(arc_end_node)
+                                    arc_direction = via[i][3]
+                                    arcs.append(Arc(len(nodes)-2, center, len(nodes)-1, c_width, arc_direction))
+                                current_start_node = len(nodes)-1 #end_node  # Update start node for next segment
+                        else:
+                            channels.append([supply_carry_node_id, connection_pre_node_id, c_width])
+                    case 'c_discharge': #c_discharge  ## ?? kombinieren mit c_supply oder zumindest dupplicated code in methode auslagern
+                        if 'rounded_vias' in channel:
+                            via = channel['rounded_vias']
+                            num_pieces = len(channel['rounded_vias'])
+                            num_extra_nodes = num_pieces * 2 # because discharge is listed before supply
+                            current_start_node = connection_node_id
 
-                if channel_name == 'c_supply_carry':
-                    channels.append([next_supply_carry_node_id, supply_carry_node_id , channel['width']]) # c_supply_carry
-                if channel_name == 'c_discharge_carry':
-                    channels.append([discharge_carry_node_id, next_discharge_carry_node_id, channel['width']]) # c_discharge_carry
-
-                if channel_name == 'c_supply': #c_supply
-                    if 'rounded_vias' in channel:
-                        via = channel['rounded_vias']
-                        num_pieces = len(channel['rounded_vias'])
-                        num_extra_nodes += num_pieces * 2
-                        current_start_node = connection_pre_node_id
-                        for i in range(num_pieces + 1):
-                            if i == num_pieces:
-                                end_node = supply_carry_node_id
-                                channels.append([current_start_node, end_node, channel['width']])
-                            else:
-                                end_node = via[i][0] + [channel['width']]
-                                end_node.append(z)
-                                end_node[0] += module_x_offset - m['channels']['c_pre']['length']
-                                nodes.append(end_node)
-                                channels.append([current_start_node, len(nodes)-1, channel['width']])
-                                start_node = end_node
-                                center = via[i][1] 
-                                center[0] += module_x_offset - m['channels']['c_pre']['length']
-                                arc_end_node = via[i][2] 
-                                arc_end_node.append(z)
-                                arc_end_node[0] += module_x_offset - m['channels']['c_pre']['length']
-                                nodes.append(arc_end_node)
-                                arc_direction = via[i][3]
-                                arcs.append([len(nodes)-2, center, len(nodes)-1, channel['width'], arc_direction])
-                            current_start_node = len(nodes)-1 #end_node  # Update start node for next segment
-                    else:
-                        channels.append([supply_carry_node_id, connection_pre_node_id, channel['width']])
-                if channel_name == 'c_discharge': #c_discharge
-                    if 'rounded_vias' in channel:
-                        via = channel['rounded_vias']
-                        num_pieces = len(channel['rounded_vias'])
-                        num_extra_nodes = num_pieces * 2 # because discharge is listed before supply
-                        current_start_node = connection_node_id
-
-                        for i in range(num_pieces + 1):
-                            if i == num_pieces:
-                                end_node = discharge_carry_node_id # adapted to take the added nodes into account
-                                channels.append([current_start_node, end_node, channel['width']])
-                            else:
-                                end_node = via[i][0] + [channel['width']]
-                                end_node.append(z)
-                                end_node[0] += module_x_offset + m['channels']['c_main']['length'] + m['channels']['c_post']['length']
-                                nodes.append(end_node)
-                                channels.append([current_start_node, len(nodes)-1, channel['width']])
-                                start_node = end_node
-                                center = via[i][1]
-                                center[0] += module_x_offset + m['channels']['c_main']['length'] + m['channels']['c_post']['length']
-                                arc_end_node = via[i][2]
-                                arc_end_node.append(z)
-                                arc_end_node[0] += module_x_offset + m['channels']['c_main']['length'] + m['channels']['c_post']['length']
-                                nodes.append(arc_end_node)
-                                arc_direction = via[i][3]
-                                arcs.append([len(nodes)-2, center, len(nodes)-1, channel['width'], arc_direction])
-                            current_start_node = len(nodes)-1 #end_node  # Update start node for next segment
-                    else:
-                        channels.append([connection_node_id, discharge_carry_node_id, channel['width']])
+                            for i in range(num_pieces + 1):
+                                if i == num_pieces:
+                                    end_node = discharge_carry_node_id # adapted to take the added nodes into account  ## diffrent to supply
+                                    channels.append([current_start_node, end_node, c_width]) 
+                                else:
+                                    end_node = via[i][0] + [c_width]
+                                    end_node.append(z)
+                                    end_node[0] += m_x_offset + m_c_main_len + m_c_post_len  ## diffrent to supply
+                                    nodes.append(end_node)
+                                    channels.append([current_start_node, len(nodes)-1, c_width])
+                                    start_node = end_node
+                                    center = via[i][1]
+                                    center[0] += m_x_offset + m_c_main_len + m_c_post_len ## diffrent to supply
+                                    arc_end_node = via[i][2]
+                                    arc_end_node.append(z)
+                                    arc_end_node[0] += m_x_offset + m_c_main_len + m_c_post_len ## diffrent to supply
+                                    nodes.append(arc_end_node)
+                                    arc_direction = via[i][3]
+                                    arcs.append(Arc(len(nodes)-2, center, len(nodes)-1, c_width, arc_direction))
+                                current_start_node = len(nodes)-1 #end_node  # Update start node for next segment
+                        else:
+                            channels.append([connection_node_id, discharge_carry_node_id, c_width]) ## diffrent to supply
 
             node_id_counter = len(nodes) - 3
         
         # ADD THE REST OF THE CHANNELS AND NODES OF THE GEOMETRY OOC DEFINITION, INCLUDING THE PUMPS
-        pump_inflow_node = next_supply_carry_node.copy()
-        pump_inflow_node[0] -= json_data['pump_stubs_length']
+        pump_inflow_node = Node(next_supply_carry_node.x - json_data['pump_stubs_length'], next_supply_carry_node.y, z)
 
-        pump_outflow_node = next_discharge_carry_node.copy()
-        pump_outflow_node[0] -= json_data['pump_stubs_length']
+        pump_outflow_node = Node(next_discharge_carry_node.x - json_data['pump_stubs_length'], next_discharge_carry_node.y, z)
 
-        refeed_pump_inflow_node = next_connection_node.copy()
-        refeed_pump_inflow_node[1] += json_data['refeed_stubs_length']
+        refeed_pump_inflow_node = Node(next_connection_node.x, next_connection_node.y + json_data['refeed_stubs_length'], z)
 
-        refeed_pump_outflow_node = next_discharge_carry_node.copy()
-        refeed_pump_outflow_node[1] -= json_data['refeed_stubs_length']
+        refeed_pump_outflow_node = Node(next_discharge_carry_node.x, next_discharge_carry_node.y - json_data['refeed_stubs_length'], z)
 
         width = m['channels']['c_supply_carry']['width']
         nodes.append(pump_inflow_node)
         pumps.append(len(nodes) - 1)
-        channels.append([len(nodes) - 1, next_supply_carry_node_id, width])
+        channels.append(Channel(len(nodes) - 1, next_supply_carry_node_id, width))
         width = m['channels']['c_discharge_carry']['width']
         nodes.append(pump_outflow_node)
         pumps.append(len(nodes) - 1)
-        channels.append([len(nodes) - 1, next_discharge_carry_node_id, width])
+        channels.append(Channel(len(nodes) - 1, next_discharge_carry_node_id, width))
         nodes.append(refeed_pump_inflow_node)
         pumps.append(len(nodes) - 1)
         width = m['channels']['c_connection']['width']
-        channels.append([len(nodes) - 1, next_connection_node_id, width])
+        channels.append(Channel(len(nodes) - 1, next_connection_node_id, width))
         nodes.append(refeed_pump_outflow_node)
         pumps.append(len(nodes) - 1)
-        channels.append([len(nodes) - 1, next_discharge_carry_node_id, width])
+        channels.append(Channel(len(nodes) - 1, next_discharge_carry_node_id, width))
 
     return nodes, pumps, channels, arcs, channel_height, organ_channels
+    ## nodes = list of Node objects
+    ## pumps = list of node IDs
+    ## channels = list of Channel objects -> each with start node ID, end node ID and width
+    ## arcs = list of Arc objects -> each with start node ID, center list (X,Y), end node ID, width and direction
+    ## channel_height = height of the channel
+    ## organ_channels = list of node ID pairs that are connected by a channel
 
+
+# ?? ggf gleich beim parsen so doch schon sehr ineffizient? 
 def define_channels_per_node(nodes: list, channels: list): # as a dictionary?
     '''
     Define all channels that are connected to each node in the network.
@@ -194,6 +201,8 @@ def define_channels_per_node(nodes: list, channels: list): # as a dictionary?
     for node in range(len(nodes)):
         for channel in channels:
             if channel[0] == node or channel[1] == node:
+                ## if aktueller node teil von channel -> channel zu liste hinzufügen
+                ## -> liste pro node mit allen channels die an dieser node anliegen
                 channels_per_node[node].append(channel)
 
     return channels_per_node
@@ -212,17 +221,17 @@ def define_quads_at_nodes(nodes: list, channels_per_node: dict):
         quad_widths = []
         quad_lengths = []
         for channel in channels_per_node[node]: # TODO include height top bottom and left right to include the connection of channels with different widths
-            width = channel[2]
-            # loop through all channels here 
+            width = channel[2] # ?? einfach die weite des channels
+            ## ?? aktuell einfach immer width appended zu quad_lengths/widths 
             if math.isclose(nodes[channel[0]][1], nodes[channel[1]][1], rel_tol=eps): # horizontal channel
-                length = abs(nodes[channel[0]][1] - nodes[channel[1]][1])
-                quad_length = width
+                length = abs(nodes[channel[0]][1] - nodes[channel[1]][1]) ## ?? nicht genutzt
+                quad_length = width ## ?? nicht genutzt
                 quad_lengths.append(width)
 
             elif math.isclose(nodes[channel[0]][0], nodes[channel[1]][0], rel_tol=eps): # vertical channel
-                length = abs(nodes[channel[0]][0] - nodes[channel[1]][0])
+                length = abs(nodes[channel[0]][0] - nodes[channel[1]][0]) ## ?? nicht genutzt
 
-                quad_width = width
+                quad_width = width ## ?? nicht genutzt
                 quad_widths.append(width)
             else:
                 print("Error: channel is not horizontal or vertical")
@@ -230,6 +239,7 @@ def define_quads_at_nodes(nodes: list, channels_per_node: dict):
 
         quads[node] = [quad_widths, quad_lengths]
     return quads
+    ## -> aktuell pro knoten einfach ein liste an rechtecken mit width = length = channel_width
 
 def define_channel_faces_xy(nodes: list, channels: list, quad_list: list):
     """
@@ -258,13 +268,13 @@ def define_channel_faces_xy(nodes: list, channels: list, quad_list: list):
                     channel_faces_xy.append([quad_1[3], quad_1[2], quad_2[1], quad_2[0]])
 
     return channel_faces_xy
-
+    ## -> channel faces sind definiert durch die quads der anliegenden knoten 
 
 def define_vertices_and_quad_list(nodes: list, quads: list, height: float):
     """
     Get the quad definition at each node, at each corner point of the quad a vertice (coordinate) is defined, additionally a quad list defines the vertices at each quad.
     """
-    quad_faces_xy = []
+    quad_faces_xy = [] ## ? nie genutzt oder returned?
     vertices = []
     quad_list = []
     # z = nodes[node][2] # TODO maybe shift back to this ?? 
@@ -311,6 +321,8 @@ def define_vertices_and_quad_list(nodes: list, quads: list, height: float):
     vertices = np.array(vertices)
 
     return vertices, quad_list
+    ## ? quad_list ist eine liste an listen mit je indexen von vertices die die ecken der quads definieren
+    ## ? wäre es hier nicht auch wieder viel eleganter die vertices die ein quad definieren im entsprechenden Node zu speichern?
 
 def define_quad_faces_xy(quad_list: list) -> list:
     """
@@ -321,7 +333,6 @@ def define_quad_faces_xy(quad_list: list) -> list:
         if len(quad) == 4:
             quad_faces.append([quad[0], quad[1], quad[2], quad[3]])
     return quad_faces
-
 
 def define_faces_side(faces_xy_bottom: list, faces_xy_top: list) -> list:
     """
@@ -991,7 +1002,6 @@ def add_chip(vertices, bottom, top, sides):
     
     return chip_block, chip_top_corners
 
-
 def chip_to_triangles(chip_block):
     '''
     Triangulate the chip block to create triangles for the final mesh.
@@ -1094,7 +1104,6 @@ def add_chip_top_layer_triangles(chip_top_corners, corner_points, corner_points_
                       [organ_tank_corner_points[0], inlet_corner_points[2], p_top_right]])
     
     return triangles
-
 
 def create_stl_file(nodes, pumps, channels, arcs, height, bottom, top, sides, pump_radius, organ_channels, file_name, channel_negative): #incl. bool to define positive or negative channel definition
     '''
@@ -1241,8 +1250,8 @@ def plot_nodes(nodes: list, channels: list):
     Plots the 1D network, including the nodes and channels in the xy plane.
     '''
     # Extract X and Y coordinates from nodes
-    x_coords = [node[0] for node in nodes]
-    y_coords = [node[1] for node in nodes]
+    x_coords = [node.x for node in nodes]
+    y_coords = [node.y for node in nodes]
 
     plt.figure(figsize=(10, 8))  # Set figure size for better visibility
     plt.scatter(x_coords, y_coords, marker='.', label='Nodes')
